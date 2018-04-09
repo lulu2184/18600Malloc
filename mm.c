@@ -220,7 +220,43 @@ void free (void *ptr) {
  * realloc
  */
 void *realloc(void *oldptr, size_t size) {
-    return NULL;
+    block_t *block = payload_to_header(oldptr);
+    size_t copysize;
+    void *newptr;
+
+    // If size == 0, then free block and return NULL
+    if (size == 0)
+    {
+        free(oldptr);
+        return NULL;
+    }
+
+    // If ptr is NULL, then equivalent to malloc
+    if (oldptr == NULL)
+    {
+        return malloc(size);
+    }
+
+    // Otherwise, proceed with reallocation
+    newptr = malloc(size);
+    // If malloc fails, the original block is left untouched
+    if (!newptr)
+    {
+        return NULL;
+    }
+
+    // Copy the old data
+    copysize = get_payload_size(block); // gets size of old payload
+    if(size < copysize)
+    {
+        copysize = size;
+    }
+    memcpy(newptr, oldptr, copysize);
+
+    // Free the old block
+    free(oldptr);
+
+    return newptr;
 }
 
 /*
@@ -228,7 +264,22 @@ void *realloc(void *oldptr, size_t size) {
  * This function is not tested by mdriver
  */
 void *calloc (size_t nmemb, size_t size) {
+    void *bp;
+    size_t asize = nmemb * size;
+
+    if (asize/nmemb != size)
+    // Multiplication overflowed
     return NULL;
+
+    bp = malloc(asize);
+    if (bp == NULL)
+    {
+        return NULL;
+    }
+    // Initialize all bits to 0
+    memset(bp, 0, asize);
+
+    return bp;
 }
 
 
@@ -356,6 +407,17 @@ static bool extract_alloc(word_t word)
 }
 
 /*
+ * get_payload_size: returns the payload size of a given block, equal to
+ *                   the entire block size minus the header and footer sizes.
+ */
+static word_t get_payload_size(block_t *block)
+{
+    size_t asize = get_size(block);
+    return asize - dsize;
+}
+
+
+/*
  * get_alloc: returns true when the block is allocated based on the
  *            block header's lowest bit, and false otherwise.
  */
@@ -423,7 +485,7 @@ static block_t* find_tail() {
     if (free_list == NULL)
         return NULL;
     block_t* block_iter;
-    for (block_iter = free_list; get_next_free(block_iter) == NULL;
+    for (block_iter = free_list; get_next_free(block_iter) != NULL;
                              block_iter = get_next_free(block_iter));
     return block_iter;
 }
@@ -587,7 +649,7 @@ static block_t *coalesce(block_t * block)
 static void insert_to_free_list(block_t *block)
 {
     block_t *block_iter;
-    dbg_printf("[Insert to free list]\n");
+    dbg_printf("[Insert to free list] %p\n", (void*)block);
 
     if (free_list == NULL) {
 //        free_list = block;
@@ -596,7 +658,13 @@ static void insert_to_free_list(block_t *block)
         return;
     }
 
-    for (block_iter = free_list; get_size(block_iter) > 0;
+    if (free_list > block) {
+        link_blocks(block, free_list);
+        link_blocks(NULL, block);
+        return;
+    }
+
+    for (block_iter = free_list; block_iter != NULL && get_size(block_iter) > 0;
                              block_iter = get_next_free(block_iter))
     {
 
@@ -607,7 +675,7 @@ static void insert_to_free_list(block_t *block)
             return;
         }
     }
-    link_blocks(block_iter, block);
+    link_blocks(find_tail(), block);
     link_blocks(block, NULL);
 }
 
