@@ -19,7 +19,7 @@
  * If you want debugging output, uncomment the following.  Be sure not
  * to have debugging enabled in your final submission
  */
-#define DEBUG
+// #define DEBUG
 
 #ifdef DEBUG
 /* When debugging is enabled, the underlying functions get called */
@@ -114,13 +114,12 @@ static block_t* get_prev_free(block_t *block);
 static block_t* get_next_free(block_t *block);
 static block_t* find_tail();
 static void link_blocks(block_t *prev, block_t* next);
-static void write_next(block_t *block, block_t* next);
-static void write_prev(block_t *block, block_t* prev);
 static void print_free_list();
 
 bool mm_checkheap(int lineno);
 
 static block_t *free_list = NULL;
+static block_t *list_tail = NULL;
 static block_t *heap_listp = NULL;
 
 /*
@@ -330,8 +329,6 @@ static block_t *extend_heap(size_t size, block_t* prev_block)
     block_t *block = payload_to_header(bp);
     write_header(block, size, false);
     write_footer(block, size, false);
-//    link_blocks(prev_block, block);
-//    write_next(block, NULL);
 
     // Create new epilogue header
     dbg_printf("Create new epilogue header..\n");
@@ -447,20 +444,6 @@ static void write_footer(block_t *block, size_t size, bool alloc)
     *footerp = pack(size, alloc);
 }
 
-
-/**
- *
- */
-static void write_next(block_t *block, block_t* next)
-{
-    block->data.ptr.next = next;
-}
-
-static void write_prev(block_t *block, block_t* prev)
-{
-    block->data.ptr.prev = prev;
-}
-
 static void link_blocks(block_t *prev, block_t* next)
 {
     if (prev != NULL)
@@ -469,6 +452,8 @@ static void link_blocks(block_t *prev, block_t* next)
         free_list = next;
     if (next != NULL)
         next->data.ptr.prev = prev;
+    else
+        list_tail = prev;
 }
 
 static block_t* get_prev_free(block_t *block)
@@ -536,10 +521,10 @@ static block_t *find_fit(size_t asize)
     block_t *block;
     dbg_printf("[find_fit] asize = %d\n", (int)asize);
 
-    for (block = free_list; block != NULL && get_size(block) > 0;
-                             block = get_next_free(block))
+    for (block = free_list; block != NULL; block = get_next_free(block))
     {
-        dbg_printf("[find_fit] block addr: %p, block size: %d\n", (void*)block, (int)get_size(block));
+        dbg_printf("[find_fit] block addr: %p, block size: %d\n",
+            (void*)block, (int)get_size(block));
 
         if (asize <= get_size(block))
         {
@@ -639,7 +624,8 @@ static block_t *coalesce(block_t * block)
         size += get_size(block_next) + get_size(block_prev);
         write_header(block_prev, size, false);
         write_footer(block_prev, size, false);
-        link_blocks(block_prev, get_next_free(block_next));
+        link_blocks(get_prev_free(block_next), get_next_free(block_next));
+        // link_blocks(block_prev, get_next_free(block_next));
 
         block = block_prev;
     }
@@ -648,11 +634,10 @@ static block_t *coalesce(block_t * block)
 
 static void insert_to_free_list(block_t *block)
 {
-    block_t *block_iter;
+    block_t *block_iter, *last_block;
     dbg_printf("[Insert to free list] %p\n", (void*)block);
 
     if (free_list == NULL) {
-//        free_list = block;
         link_blocks(NULL, block);
         link_blocks(block, NULL);
         return;
@@ -664,7 +649,7 @@ static void insert_to_free_list(block_t *block)
         return;
     }
 
-    for (block_iter = free_list; block_iter != NULL && get_size(block_iter) > 0;
+    for (block_iter = free_list; block_iter != NULL;
                              block_iter = get_next_free(block_iter))
     {
 
@@ -674,8 +659,9 @@ static void insert_to_free_list(block_t *block)
             link_blocks(block, block_iter);
             return;
         }
+        last_block = block_iter;
     }
-    link_blocks(find_tail(), block);
+    link_blocks(last_block, block);
     link_blocks(block, NULL);
 }
 
