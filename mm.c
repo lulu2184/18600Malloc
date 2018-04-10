@@ -1,8 +1,14 @@
 /*
  * mm.c
  *
- * NOTE TO STUDENTS: Replace this header comment with your own header
- * comment that gives a high level description of your solution.
+ * Malloc Lab Checkpoint
+ * Lu Liu (Andrew ID: lul3)
+ *
+ * Strategy: use explicit list to maintain free blocks in it, and exploit FIFO
+ * strategy. When a block is freed, it would be added at the beginning of the
+ * list. And when a block need to be allocated, scan the list from the
+ * beginning, and use the first fit free block in the explicit list.
+ *
  */
 #include <assert.h>
 #include <stdio.h>
@@ -83,7 +89,7 @@ typedef struct block
 } block_t;
 
 /* Function prototypes for internal helper routines */
-static block_t *extend_heap(size_t size, block_t* prev_block);
+static block_t *extend_heap(size_t size);
 static void place(block_t *block, size_t asize);
 static block_t *find_fit(size_t asize);
 static block_t *coalesce(block_t *block);
@@ -112,7 +118,6 @@ static block_t *find_prev(block_t *block);
 static void insert_to_free_list(block_t *block);
 static block_t* get_prev_free(block_t *block);
 static block_t* get_next_free(block_t *block);
-static block_t* find_tail();
 static void link_blocks(block_t *prev, block_t* next);
 static void print_free_list();
 
@@ -139,13 +144,12 @@ bool mm_init(void) {
     free_list = NULL;
 
     dbg_printf("Before extend heap.\n");
-    if (extend_heap(chunksize, NULL) == NULL) {
+    if (extend_heap(chunksize) == NULL) {
       return false;
     }
 
     dbg_printf("Finish init.\n");
 
-    print_free_list();
     return true;
 }
 
@@ -177,12 +181,12 @@ void *malloc (size_t size) {
     if (block == NULL)
     {
         extendsize = max(asize, chunksize);
-        block = extend_heap(extendsize, find_tail());
+        block = extend_heap(extendsize);
         if (block == NULL) // extend_heap returns an error
         {
             return bp;
         }
-        print_free_list();
+        // print_free_list();
     }
 
     place(block, asize);
@@ -191,7 +195,6 @@ void *malloc (size_t size) {
 
     dbg_printf("Malloc size %zd on address %p.\n", size, bp);
     dbg_ensures(mm_checkheap);
-    print_free_list();
     return bp;
 }
 
@@ -212,7 +215,7 @@ void free (void *ptr) {
     write_footer(block, size, false);
 
     coalesce(block);
-    print_free_list();
+    dbg_ensures(mm_checkheap);
 }
 
 /*
@@ -303,7 +306,33 @@ static bool aligned(const void *p) {
  * mm_checkheap
  */
 bool mm_checkheap(int lineno) {
-    return true;
+    block_t *block;
+    word_t header;
+    word_t *footerp;
+
+    for (block = heap_listp; get_size(block) > 0;
+                             block = find_next(block))
+    {
+        header = block->header;
+        footerp = (word_t *)((block->data.payload) + get_size(block) - dsize);
+        if (*footerp != header)
+        {
+            dbg_printf("[Heap Error on line %d] different header and footer \
+                        for block on %p\n", lineno, (void*)block);
+            return false;
+        }
+    }
+
+    for (block = free_list; block != NULL; block = get_next_free(block))
+    {
+        if (get_alloc(block) > 0)
+        {
+            dbg_printf("[Heap Error on line %d] Allocated block %p is in \
+                        free list.\n", lineno, (void*)block);
+            return false;
+        }
+    }
+    return NULL; // no fit found
 }
 
 /*
@@ -312,7 +341,7 @@ bool mm_checkheap(int lineno) {
  *              coalescing the newly-created block with previous free block, if
  *              applicable, or NULL in failure.
  */
-static block_t *extend_heap(size_t size, block_t* prev_block)
+static block_t *extend_heap(size_t size)
 {
     void *bp;
 
@@ -355,8 +384,6 @@ static block_t *payload_to_header(void *bp)
  */
 static void *header_to_payload(block_t *block)
 {
-    dbg_printf("[header_to_payload] block addr: %lx\n", (uint64_t)block);
-    dbg_printf("[header_to_payload] data addr: %lx\n", (uint64_t)(&block->data));
     return (void *)(&(block->data));
 }
 
@@ -440,10 +467,14 @@ static void write_header(block_t *block, size_t size, bool alloc)
  */
 static void write_footer(block_t *block, size_t size, bool alloc)
 {
-    word_t *footerp = (word_t *)((block->data.payload) + get_size(block) - dsize);
+    word_t *footerp = (word_t *)((block->data.payload)
+        + get_size(block) - dsize);
     *footerp = pack(size, alloc);
 }
 
+/**
+ * Link up two blocks in the explicit list.
+ */
 static void link_blocks(block_t *prev, block_t* next)
 {
     if (prev != NULL)
@@ -456,30 +487,27 @@ static void link_blocks(block_t *prev, block_t* next)
         list_tail = prev;
 }
 
+/**
+ * Get previous free block in free list.
+ */
 static block_t* get_prev_free(block_t *block)
 {
     return block->data.ptr.prev;
 }
 
+/**
+ * Get next free block in free list.
+ */
 static block_t* get_next_free(block_t *block)
 {
     return block->data.ptr.next;
-}
-
-static block_t* find_tail() {
-    if (free_list == NULL)
-        return NULL;
-    block_t* block_iter;
-    for (block_iter = free_list; get_next_free(block_iter) != NULL;
-                             block_iter = get_next_free(block_iter));
-    return block_iter;
 }
 
 /*
  * place: Places block with size of asize at the start of bp. If the remaining
  *        size is at least the minimum block size, then split the block to the
  *        the allocated block and the remaining block as free, which is then
- *        inserted into the segregated list. Requires that the block is
+ *        inserted into the free list. Requires that the block is
  *        initially unallocated.
  */
 static void place(block_t *block, size_t asize)
@@ -543,7 +571,6 @@ static size_t max(size_t x, size_t y)
     return (x > y) ? x : y;
 }
 
-
 /*
  * round_up: Rounds size up to next multiple of n
  */
@@ -589,11 +616,13 @@ static block_t *coalesce(block_t * block)
 {
     block_t *block_next = find_next(block);
     block_t *block_prev = find_prev(block);
-    dbg_printf("[Coalesce]next: %p  prev: %p\n", (void*)block_next, (void*)block_prev);
+    dbg_printf("[Coalesce]next: %p  prev: %p\n",
+        (void*)block_next, (void*)block_prev);
 
     bool prev_alloc = extract_alloc(*(find_prev_footer(block)));
     bool next_alloc = get_alloc(block_next);
-    dbg_printf("[Coalesce]next alloc: %d  prev alloc: %d\n", (int)next_alloc, (int)prev_alloc);
+    dbg_printf("[Coalesce]next alloc: %d  prev alloc: %d\n",
+        (int)next_alloc, (int)prev_alloc);
     size_t size = get_size(block);
 
     if (prev_alloc && next_alloc)              // Case 1
@@ -625,16 +654,17 @@ static block_t *coalesce(block_t * block)
         write_header(block_prev, size, false);
         write_footer(block_prev, size, false);
         link_blocks(get_prev_free(block_next), get_next_free(block_next));
-        // link_blocks(block_prev, get_next_free(block_next));
 
         block = block_prev;
     }
     return block;
 }
 
+/**
+ * Insert a new free block into the free list.
+ */
 static void insert_to_free_list(block_t *block)
 {
-    block_t *block_iter, *last_block;
     dbg_printf("[Insert to free list] %p\n", (void*)block);
 
     if (free_list == NULL) {
@@ -643,28 +673,14 @@ static void insert_to_free_list(block_t *block)
         return;
     }
 
-    if (free_list > block) {
-        link_blocks(block, free_list);
-        link_blocks(NULL, block);
-        return;
-    }
-
-    for (block_iter = free_list; block_iter != NULL;
-                             block_iter = get_next_free(block_iter))
-    {
-
-        if (block_iter > block)
-        {
-            link_blocks(get_prev_free(block_iter), block);
-            link_blocks(block, block_iter);
-            return;
-        }
-        last_block = block_iter;
-    }
-    link_blocks(last_block, block);
+    link_blocks(list_tail, block);
     link_blocks(block, NULL);
+    return;
 }
 
+/**
+ * Print free blocks in list for debug.
+ */
 static void print_free_list()
 {
     dbg_printf("-----------------Free List------------------\n");
@@ -672,9 +688,11 @@ static void print_free_list()
     for (block_iter = free_list; block_iter != NULL;
             block_iter = get_next_free(block_iter))
     {
-        dbg_printf("[Free list] block addr: %p, block size: %d prev: %p next: %p\n",
+        dbg_printf("[Free list] block addr: %p, block size: %d \
+                    prev: %p next: %p\n",
                 (void*)block_iter, (int)get_size(block_iter),
-                (void*)get_prev_free(block_iter), (void*)get_next_free(block_iter));
+                (void*)get_prev_free(block_iter),
+                (void*)get_next_free(block_iter));
     }
     dbg_printf("-----------------Free List END------------------\n");
 }
