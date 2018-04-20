@@ -561,20 +561,26 @@ static void place(block_t *block, size_t asize)
  */
 static block_t *find_fit(size_t asize)
 {
-    block_t *block;
+    block_t *block, *selected;
     int i;
-    size_t block_size;
+    size_t block_size, min_block;
     dbg_printf("[find_fit] asize = %d\n", (int)asize);
 
     int index = find_fit_segregated_list(asize);
     for (i = index; i < NUM_LIST; i++) {
+        min_block = 0x7FFFFFFF;
         for (block = segregated_list[i]; block != NULL;
             block = get_next_free(block)) {
             block_size = get_size(block);
-            if (asize <= block_size) {
+            if (block_size == asize)
                 return block;
+            if (asize <= block_size && block_size < min_block) {
+                min_block = block_size;
+                selected = block;
             }
         }
+        if (min_block < 0x7FFFFFFF)
+            return selected;
     }
     dbg_printf("[find_fit] NULL\n");
     return NULL; // No fit block found.
