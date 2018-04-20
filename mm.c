@@ -25,7 +25,7 @@
  * If you want debugging output, uncomment the following.  Be sure not
  * to have debugging enabled in your final submission
  */
-// #define DEBUG
+//#define DEBUG
 
 #ifdef DEBUG
 /* When debugging is enabled, the underlying functions get called */
@@ -59,11 +59,13 @@
 /* What is the correct alignment? */
 #define ALIGNMENT 16
 
+#define NUM_LIST 8
+
  /* Basic constants */
 typedef uint64_t word_t;
 static const size_t wsize = sizeof(word_t);   // word and header size (bytes)
 static const size_t dsize = 2*wsize;          // double word size (bytes)
-static const size_t min_block_size = 2*dsize; // Minimum block size
+static const size_t min_block_size = 3*dsize; // Minimum block size
 static const size_t chunksize = (1 << 12);    // requires (chunksize % 16 == 0)
 
 static const word_t alloc_mask = 0x1;
@@ -84,6 +86,7 @@ typedef struct block
         {
             struct block *next;
             struct block *prev;
+            int list_index;
         } ptr;
     }data;
 } block_t;
@@ -116,24 +119,32 @@ static word_t *find_prev_footer(block_t *block);
 static block_t *find_prev(block_t *block);
 
 static void insert_to_free_list(block_t *block);
+static void remove_block_from_list(block_t* block);
 static block_t* get_prev_free(block_t *block);
 static block_t* get_next_free(block_t *block);
 static void link_blocks(block_t *prev, block_t* next);
+static int find_fit_segregated_list(int size);
 static void print_free_list();
 
 bool mm_checkheap(int lineno);
 
-static block_t *free_list = NULL;
-static block_t *list_tail = NULL;
 static block_t *heap_listp = NULL;
+static int *segregated_size = NULL;
+static block_t **segregated_list = NULL;
 
 /*
  * Initialize: return false on error, true on success.
  */
 bool mm_init(void) {
     dbg_printf("Start init.\n");
+    int block_size, i;
 
+    segregated_size = (int *)(mem_sbrk(sizeof(int) * NUM_LIST));
+    segregated_list = (block_t**)(mem_sbrk(sizeof(block_t*) * NUM_LIST));
     word_t *start = (word_t *)(mem_sbrk(2 * wsize));
+    dbg_printf("segregated_size: %p, segregated_list: %p - %p\n",
+        (void*)segregated_size, (void*)segregated_list,
+        (void*)(&segregated_list[NUM_LIST - 1]));
     if (start == (void *)-1)
     {
         return false;
@@ -141,7 +152,15 @@ bool mm_init(void) {
     start[0] = pack(0, true);
     start[1] = pack(1, true);
     heap_listp = (block_t *) &(start[1]);
-    free_list = NULL;
+
+    block_size = 16;
+    for (i = 0; i < NUM_LIST - 1; i++) {
+        segregated_size[i] = block_size;
+        block_size *= 2;
+    }
+    for (i = 0; i < NUM_LIST; i++) {
+        segregated_list[i] = NULL;
+    }
 
     dbg_printf("Before extend heap.\n");
     if (extend_heap(chunksize) == NULL) {
@@ -150,6 +169,7 @@ bool mm_init(void) {
 
     dbg_printf("Finish init.\n");
 
+    print_free_list();
     return true;
 }
 
@@ -174,7 +194,7 @@ void *malloc (size_t size) {
         return bp;
     }
 
-    asize = round_up(size, dsize) + dsize;
+    asize = max(round_up(size, dsize) + dsize, min_block_size);
     block = find_fit(asize);
     dbg_printf("Fit block: %p\n", (void*)block);
 
@@ -323,15 +343,15 @@ bool mm_checkheap(int lineno) {
         }
     }
 
-    for (block = free_list; block != NULL; block = get_next_free(block))
-    {
-        if (get_alloc(block) > 0)
-        {
-            dbg_printf("[Heap Error on line %d] Allocated block %p is in \
-                        free list.\n", lineno, (void*)block);
-            return false;
-        }
-    }
+    // for (block = free_list; block != NULL; block = get_next_free(block))
+    // {
+    //     if (get_alloc(block) > 0)
+    //     {
+    //         dbg_printf("[Heap Error on line %d] Allocated block %p is in \
+    //                     free list.\n", lineno, (void*)block);
+    //         return false;
+    //     }
+    // }
     return NULL; // no fit found
 }
 
@@ -479,12 +499,8 @@ static void link_blocks(block_t *prev, block_t* next)
 {
     if (prev != NULL)
         prev->data.ptr.next = next;
-    else
-        free_list = next;
     if (next != NULL)
         next->data.ptr.prev = prev;
-    else
-        list_tail = prev;
 }
 
 /**
@@ -527,8 +543,8 @@ static void place(block_t *block, size_t asize)
         write_header(block_next, csize-asize, false);
         write_footer(block_next, csize-asize, false);
 
-        link_blocks(get_prev_free(block), block_next);
-        link_blocks(block_next, get_next_free(block));
+        remove_block_from_list(block);
+        insert_to_free_list(block_next);
     }
 
     else
@@ -536,7 +552,7 @@ static void place(block_t *block, size_t asize)
         dbg_printf("[place] Case 2\n");
         write_header(block, csize, true);
         write_footer(block, csize, true);
-        link_blocks(get_prev_free(block), get_next_free(block));
+        remove_block_from_list(block);
     }
 }
 
@@ -547,20 +563,22 @@ static void place(block_t *block, size_t asize)
 static block_t *find_fit(size_t asize)
 {
     block_t *block;
+    int i;
+    size_t block_size;
     dbg_printf("[find_fit] asize = %d\n", (int)asize);
 
-    for (block = free_list; block != NULL; block = get_next_free(block))
-    {
-        dbg_printf("[find_fit] block addr: %p, block size: %d\n",
-            (void*)block, (int)get_size(block));
-
-        if (asize <= get_size(block))
-        {
-            return block;
+    int index = find_fit_segregated_list(asize);
+    for (i = index; i < NUM_LIST; i++) {
+        for (block = segregated_list[i]; block != NULL;
+            block = get_next_free(block)) {
+            block_size = get_size(block);
+            if (asize <= block_size) {
+                return block;
+            }
         }
     }
     dbg_printf("[find_fit] NULL\n");
-    return NULL; // no fit found
+    return NULL; // No fit block found.
 }
 
 /*
@@ -634,26 +652,30 @@ static block_t *coalesce(block_t * block)
     else if (prev_alloc && !next_alloc)        // Case 2
     {
         size += get_size(block_next);
+        remove_block_from_list(block_next);
         write_header(block, size, false);
         write_footer(block, size, false);
-        link_blocks(block, get_next_free(block_next));
-        link_blocks(get_prev_free(block_next), block);
+        insert_to_free_list(block);
     }
 
     else if (!prev_alloc && next_alloc)        // Case 3
     {
         size += get_size(block_prev);
+        remove_block_from_list(block_prev);
         write_header(block_prev, size, false);
         write_footer(block_prev, size, false);
         block = block_prev;
+        insert_to_free_list(block);
     }
 
     else                                        // Case 4
     {
         size += get_size(block_next) + get_size(block_prev);
+        remove_block_from_list(block_prev);
+        remove_block_from_list(block_next);
         write_header(block_prev, size, false);
         write_footer(block_prev, size, false);
-        link_blocks(get_prev_free(block_next), get_next_free(block_next));
+        insert_to_free_list(block_prev);
 
         block = block_prev;
     }
@@ -665,34 +687,62 @@ static block_t *coalesce(block_t * block)
  */
 static void insert_to_free_list(block_t *block)
 {
-    dbg_printf("[Insert to free list] %p\n", (void*)block);
+    int index = find_fit_segregated_list(get_size(block));
+    block_t *selected = segregated_list[index];
 
-    if (free_list == NULL) {
+    dbg_printf("[Insert to free list] %p index: %d\n", (void*)block, index);
+    if (selected == NULL) {
         link_blocks(NULL, block);
         link_blocks(block, NULL);
+        block->data.ptr.list_index = index;
+        segregated_list[index] = block;
+        print_free_list();
         return;
     }
 
-    link_blocks(list_tail, block);
-    link_blocks(block, NULL);
+    link_blocks(NULL, block);
+    link_blocks(block, selected);
+    block->data.ptr.list_index = index;
+    segregated_list[index] = block;
+    print_free_list();
     return;
 }
 
-/**
- * Print free blocks in list for debug.
- */
+static void remove_block_from_list(block_t* block)
+{
+    block_t *prev = get_prev_free(block);
+    block_t *next = get_next_free(block);
+    dbg_printf("[Remove block from list] %p prev: %p, next: %p list_index: %d\n",
+        (void*)block, (void*)prev, (void*)next, block->data.ptr.list_index);
+    if (prev == NULL)
+        segregated_list[block->data.ptr.list_index] = next;
+    link_blocks(prev, next);
+    print_free_list();
+}
+
+static int find_fit_segregated_list(int size)
+{
+    for (int i = 0; i < NUM_LIST - 1; i++) {
+        if (segregated_size[i] >= size) {
+            return i;
+        }
+    }
+    return NUM_LIST - 1;
+}
+
 static void print_free_list()
 {
-    dbg_printf("-----------------Free List------------------\n");
     block_t *block_iter;
-    for (block_iter = free_list; block_iter != NULL;
-            block_iter = get_next_free(block_iter))
-    {
-        dbg_printf("[Free list] block addr: %p, block size: %d \
-                    prev: %p next: %p\n",
-                (void*)block_iter, (int)get_size(block_iter),
-                (void*)get_prev_free(block_iter),
-                (void*)get_next_free(block_iter));
+
+    dbg_printf("-----------------Free List------------------\n");
+    for (int i = 0; i < NUM_LIST; i++) {
+        for (block_iter = segregated_list[i]; block_iter != NULL;
+                block_iter = get_next_free(block_iter)) {
+            dbg_printf("[Free list %d] block addr: %p, block size: %d prev: %p next: %p list_index: %d\n",
+                    i, (void*)block_iter, (int)get_size(block_iter),
+                    (void*)get_prev_free(block_iter), (void*)get_next_free(block_iter),
+                    block_iter->data.ptr.list_index);
+        }
     }
     dbg_printf("-----------------Free List END------------------\n");
 }
