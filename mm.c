@@ -564,6 +564,7 @@ static block_t *find_fit(size_t asize)
     block_t *block, *selected;
     int i;
     size_t block_size, min_block;
+
     dbg_printf("[find_fit] asize = %d\n", (int)asize);
 
     int index = find_fit_segregated_list(asize);
@@ -574,7 +575,8 @@ static block_t *find_fit(size_t asize)
             block_size = get_size(block);
             if (block_size == asize)
                 return block;
-            if (asize <= block_size && block_size < min_block) {
+            if (asize <= block_size && block_size < min_block &&
+                block_size - asize >= min_block_size) {
                 min_block = block_size;
                 selected = block;
             }
