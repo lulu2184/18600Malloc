@@ -152,7 +152,7 @@ bool mm_init(void) {
     start[1] = pack(1, true);
     heap_listp = (block_t *) &(start[1]);
 
-    block_size = 32;
+    block_size = 50;
     for (i = 0; i < NUM_LIST - 1; i++) {
         segregated_size[i] = block_size;
         block_size = (int)(block_size * 1.7 + 33);
