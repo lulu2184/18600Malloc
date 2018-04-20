@@ -65,8 +65,8 @@
 typedef uint64_t word_t;
 static const size_t wsize = sizeof(word_t);   // word and header size (bytes)
 static const size_t dsize = 2*wsize;          // double word size (bytes)
-static const size_t min_block_size = 3*dsize; // Minimum block size
-static const size_t chunksize = (1 << 12);    // requires (chunksize % 16 == 0)
+static const size_t min_block_size = 2*dsize; // Minimum block size
+static const size_t chunksize = (1 << 8);    // requires (chunksize % 16 == 0)
 
 static const word_t alloc_mask = 0x1;
 static const word_t size_mask = ~(word_t)0xF;
@@ -86,7 +86,6 @@ typedef struct block
         {
             struct block *next;
             struct block *prev;
-            int list_index;
         } ptr;
     }data;
 } block_t;
@@ -153,10 +152,10 @@ bool mm_init(void) {
     start[1] = pack(1, true);
     heap_listp = (block_t *) &(start[1]);
 
-    block_size = 16;
+    block_size = 50;
     for (i = 0; i < NUM_LIST - 1; i++) {
         segregated_size[i] = block_size;
-        block_size *= 2;
+        block_size = (int)(block_size * 1.7 + 33);
     }
     for (i = 0; i < NUM_LIST; i++) {
         segregated_list[i] = NULL;
@@ -624,6 +623,14 @@ static size_t get_size(block_t *block)
     return extract_size(block->header);
 }
 
+static int get_list_index(block_t* block)
+{
+    for (int i = 0; i < NUM_LIST; i++) {
+        if (segregated_list[i] == block)
+            return i;
+    }
+    return 0;
+}
 
 /* Coalesce: Coalesces current block with previous and next blocks if either
  *           or both are unallocated; otherwise the block is not modified.
@@ -694,7 +701,6 @@ static void insert_to_free_list(block_t *block)
     if (selected == NULL) {
         link_blocks(NULL, block);
         link_blocks(block, NULL);
-        block->data.ptr.list_index = index;
         segregated_list[index] = block;
         print_free_list();
         return;
@@ -702,7 +708,6 @@ static void insert_to_free_list(block_t *block)
 
     link_blocks(NULL, block);
     link_blocks(block, selected);
-    block->data.ptr.list_index = index;
     segregated_list[index] = block;
     print_free_list();
     return;
@@ -712,10 +717,10 @@ static void remove_block_from_list(block_t* block)
 {
     block_t *prev = get_prev_free(block);
     block_t *next = get_next_free(block);
-    dbg_printf("[Remove block from list] %p prev: %p, next: %p list_index: %d\n",
-        (void*)block, (void*)prev, (void*)next, block->data.ptr.list_index);
+    dbg_printf("[Remove block from list] %p prev: %p, next: %p\n",
+        (void*)block, (void*)prev, (void*)next);
     if (prev == NULL)
-        segregated_list[block->data.ptr.list_index] = next;
+        segregated_list[get_list_index(block)] = next;
     link_blocks(prev, next);
     print_free_list();
 }
@@ -738,10 +743,9 @@ static void print_free_list()
     for (int i = 0; i < NUM_LIST; i++) {
         for (block_iter = segregated_list[i]; block_iter != NULL;
                 block_iter = get_next_free(block_iter)) {
-            dbg_printf("[Free list %d] block addr: %p, block size: %d prev: %p next: %p list_index: %d\n",
+            dbg_printf("[Free list %d] block addr: %p, block size: %d prev: %p next: %p\n",
                     i, (void*)block_iter, (int)get_size(block_iter),
-                    (void*)get_prev_free(block_iter), (void*)get_next_free(block_iter),
-                    block_iter->data.ptr.list_index);
+                    (void*)get_prev_free(block_iter), (void*)get_next_free(block_iter));
         }
     }
     dbg_printf("-----------------Free List END------------------\n");
