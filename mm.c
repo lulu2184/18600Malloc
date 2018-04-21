@@ -65,7 +65,7 @@
 typedef uint64_t word_t;
 static const size_t wsize = sizeof(word_t);   // word and header size (bytes)
 static const size_t dsize = 2*wsize;          // double word size (bytes)
-static const size_t min_block_size = 3*dsize; // Minimum block size
+static const size_t min_block_size = 2*dsize; // Minimum block size
 static const size_t chunksize = (1 << 8);    // requires (chunksize % 16 == 0)
 
 static const word_t alloc_mask = 0x1;
@@ -80,14 +80,14 @@ typedef struct block
 {
     word_t header;
 
-    union data{
+    union data {
         char payload[0];
         struct list_ptr
         {
             struct block *next;
             struct block *prev;
         } ptr;
-    }data;
+    } data;
 } block_t;
 
 /* Function prototypes for internal helper routines */
@@ -155,7 +155,7 @@ bool mm_init(void) {
     start[1] = pack(1, true, true);
     heap_listp = (block_t *) &(start[1]);
 
-    block_size = 32;
+    block_size = 50;
     for (i = 0; i < NUM_LIST - 1; i++) {
         segregated_size[i] = block_size;
         block_size = (int)(block_size * 1.7 + 33);
