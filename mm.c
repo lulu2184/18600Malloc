@@ -65,7 +65,7 @@
 typedef uint64_t word_t;
 static const size_t wsize = sizeof(word_t);   // word and header size (bytes)
 static const size_t dsize = 2*wsize;          // double word size (bytes)
-static const size_t min_block_size = 2*dsize; // Minimum block size
+static const size_t min_block_size = 3*dsize; // Minimum block size
 static const size_t chunksize = (1 << 8);    // requires (chunksize % 16 == 0)
 
 static const word_t alloc_mask = 0x1;
@@ -98,7 +98,7 @@ static block_t *coalesce(block_t *block);
 
 static size_t max(size_t x, size_t y);
 static size_t round_up(size_t size, size_t n);
-static word_t pack(size_t size, bool alloc);
+static word_t pack(size_t size, bool prev_alloc, bool alloc);
 
 static size_t extract_size(word_t header);
 static size_t get_size(block_t *block);
@@ -106,9 +106,12 @@ static size_t get_payload_size(block_t *block);
 
 static bool extract_alloc(word_t header);
 static bool get_alloc(block_t *block);
+static bool get_prev_alloc(block_t *block);
 
-static void write_header(block_t *block, size_t size, bool alloc);
+static void write_header(
+    block_t *block, size_t size, bool prev_alloc, bool alloc);
 static void write_footer(block_t *block, size_t size, bool alloc);
+static void write_next_prev_alloc(block_t *block, size_t size, bool blloc);
 
 static block_t *payload_to_header(void *bp);
 static void *header_to_payload(block_t *block);
@@ -148,8 +151,8 @@ bool mm_init(void) {
     {
         return false;
     }
-    start[0] = pack(0, true);
-    start[1] = pack(1, true);
+    start[0] = pack(0, true, true);
+    start[1] = pack(1, true, true);
     heap_listp = (block_t *) &(start[1]);
 
     block_size = 32;
@@ -193,7 +196,7 @@ void *malloc (size_t size) {
         return bp;
     }
 
-    asize = round_up(size, dsize) + dsize;
+    asize = max(round_up(size + wsize, dsize), min_block_size);
     block = find_fit(asize);
     dbg_printf("Fit block: %p\n", (void*)block);
 
@@ -230,8 +233,9 @@ void free (void *ptr) {
     size_t size = get_size(block);
     dbg_printf("Free block at addr %p with size %d.\n", (void*)block, (int)size);
 
-    write_header(block, size, false);
+    write_header(block, size, get_prev_alloc(block), false);
     write_footer(block, size, false);
+    write_next_prev_alloc(block, size, false);
 
     coalesce(block);
     dbg_ensures(mm_checkheap);
@@ -375,13 +379,18 @@ static block_t *extend_heap(size_t size)
     // Initialize free block header/footer
     dbg_printf("Initialize free block header/footer.\n");
     block_t *block = payload_to_header(bp);
-    write_header(block, size, false);
+    write_header(block, size, get_prev_alloc(block), false);
     write_footer(block, size, false);
+    write_next_prev_alloc(block, size, false);
+    dbg_printf("[Extend heap] extend block: %p, header: %p\n",
+        (void*)block, (void*)block->header);
 
     // Create new epilogue header
     dbg_printf("Create new epilogue header..\n");
     block_t *block_next = find_next(block);
-    write_header(block_next, 0, true);
+    write_header(block_next, 0, false, true);
+    dbg_printf("[Extend heap] Next block: %p, header: %p\n",
+        (void*)block_next, (void*)block_next->header);
 
     // Coalesce in case the previous block was free
     dbg_printf("Coalesce\n");
@@ -428,6 +437,12 @@ static word_t *find_prev_footer(block_t *block)
     return (&(block->header)) - 1;
 }
 
+static word_t *find_footer(block_t *block)
+{
+    return (word_t *)((block->data.payload)
+        + get_size(block) - dsize);
+}
+
 /*
  * find_prev: returns the previous block position by checking the previous
  *            block's footer and calculating the start of the previous block
@@ -437,6 +452,8 @@ static block_t *find_prev(block_t *block)
 {
     word_t *footerp = find_prev_footer(block);
     size_t size = extract_size(*footerp);
+    dbg_printf("[find prev] footer: %d (at %p)\n",
+        (int)*footerp, (void*)footerp);
     return (block_t *)((char *)block - size);
 }
 
@@ -456,7 +473,7 @@ static bool extract_alloc(word_t word)
 static word_t get_payload_size(block_t *block)
 {
     size_t asize = get_size(block);
-    return asize - dsize;
+    return asize - wsize;
 }
 
 
@@ -469,13 +486,24 @@ static bool get_alloc(block_t *block)
     return extract_alloc(block->header);
 }
 
+static bool get_prev_alloc(block_t *block)
+{
+    return (bool) ((block->header >> 1) & 1);
+}
+
+static word_t change_prev_alloc(word_t word, bool prev_alloc)
+{
+    return (word & ~2) | (prev_alloc << 1);
+}
+
 /*
  * write_header: given a block and its size and allocation status,
  *               writes an appropriate value to the block header.
  */
-static void write_header(block_t *block, size_t size, bool alloc)
+static void write_header(block_t *block, size_t size,
+    bool prev_alloc, bool alloc)
 {
-    block->header = pack(size, alloc);
+    block->header = pack(size, prev_alloc, alloc);
 }
 
 
@@ -488,7 +516,14 @@ static void write_footer(block_t *block, size_t size, bool alloc)
 {
     word_t *footerp = (word_t *)((block->data.payload)
         + get_size(block) - dsize);
-    *footerp = pack(size, alloc);
+    *footerp = pack(size, false, alloc);
+    dbg_printf("[write footer] %p => %d\n", (void*)footerp, (int)*footerp);
+}
+
+static void write_next_prev_alloc(block_t *block, size_t size, bool alloc)
+{
+    block_t *next_block = find_next(block);
+    next_block->header = change_prev_alloc(next_block->header, alloc);
 }
 
 /**
@@ -535,12 +570,18 @@ static void place(block_t *block, size_t asize)
     {
         dbg_printf("[place] Case 1\n");
         block_t *block_next;
-        write_header(block, asize, true);
-        write_footer(block, asize, true);
+        write_header(block, asize, get_prev_alloc(block), true);
+        write_next_prev_alloc(block, asize, true);
+        dbg_printf("[place] block: %p, header: %p\n",
+            (void*)block, (void*)block->header);
 
         block_next = find_next(block);
-        write_header(block_next, csize-asize, false);
+        write_header(block_next, csize-asize, true, false);
         write_footer(block_next, csize-asize, false);
+        // word_t *footer = find_footer(block_next);
+        // dbg_printf("[place] next block: %p, header: %p footer: %d(addr=%p)\n",
+        //     (void*)block_next, (void*)block_next->header,
+        //     (int)*footer, (void*)footer);
 
         remove_block_from_list(block);
         insert_to_free_list(block_next);
@@ -549,8 +590,8 @@ static void place(block_t *block, size_t asize)
     else
     {
         dbg_printf("[place] Case 2\n");
-        write_header(block, csize, true);
-        write_footer(block, csize, true);
+        write_header(block, csize, get_prev_alloc(block), true);
+        write_next_prev_alloc(block, csize, true);
         remove_block_from_list(block);
     }
 }
@@ -608,9 +649,9 @@ static size_t round_up(size_t size, size_t n)
  * pack: returns a header reflecting a specified size and its alloc status.
  *       If the block is allocated, the lowest bit is set to 1, and 0 otherwise.
  */
-static word_t pack(size_t size, bool alloc)
+static word_t pack(size_t size, bool prev_alloc, bool alloc)
 {
-    return alloc ? (size | 1) : size;
+    return size | alloc | (prev_alloc << 1);
 }
 
 /*
@@ -647,12 +688,12 @@ static int get_list_index(block_t* block)
  */
 static block_t *coalesce(block_t * block)
 {
+    block_t *block_prev = NULL;
     block_t *block_next = find_next(block);
-    block_t *block_prev = find_prev(block);
     dbg_printf("[Coalesce]next: %p  prev: %p\n",
         (void*)block_next, (void*)block_prev);
 
-    bool prev_alloc = extract_alloc(*(find_prev_footer(block)));
+    bool prev_alloc = get_prev_alloc(block);
     bool next_alloc = get_alloc(block_next);
     dbg_printf("[Coalesce]next alloc: %d  prev alloc: %d\n",
         (int)next_alloc, (int)prev_alloc);
@@ -667,17 +708,22 @@ static block_t *coalesce(block_t * block)
     else if (prev_alloc && !next_alloc)        // Case 2
     {
         size += get_size(block_next);
+        dbg_printf("[Coalesce]next: %p  prev: %p\n",
+            (void*)block_next, (void*)block_prev);
         remove_block_from_list(block_next);
-        write_header(block, size, false);
+        write_header(block, size, get_prev_alloc(block), false);
         write_footer(block, size, false);
         insert_to_free_list(block);
     }
 
     else if (!prev_alloc && next_alloc)        // Case 3
     {
+        block_prev = find_prev(block);
+        dbg_printf("[Coalesce]next: %p  prev: %p\n",
+            (void*)block_next, (void*)block_prev);
         size += get_size(block_prev);
         remove_block_from_list(block_prev);
-        write_header(block_prev, size, false);
+        write_header(block_prev, size, get_prev_alloc(block_prev), false);
         write_footer(block_prev, size, false);
         block = block_prev;
         insert_to_free_list(block);
@@ -685,10 +731,13 @@ static block_t *coalesce(block_t * block)
 
     else                                        // Case 4
     {
+        block_prev = find_prev(block);
+        dbg_printf("[Coalesce]next: %p  prev: %p\n",
+            (void*)block_next, (void*)block_prev);
         size += get_size(block_next) + get_size(block_prev);
         remove_block_from_list(block_prev);
         remove_block_from_list(block_next);
-        write_header(block_prev, size, false);
+        write_header(block_prev, size, get_prev_alloc(block_prev), false);
         write_footer(block_prev, size, false);
         insert_to_free_list(block_prev);
 
