@@ -70,6 +70,15 @@ static const size_t chunksize = (1 << 8);    // requires (chunksize % 16 == 0)
 
 static const word_t alloc_mask = 0x1;
 static const word_t size_mask = ~(word_t)0xF;
+// static const word_t small_block_base_mask = ~(word_t)0x1FF;
+// static const word_t small_block_bias_mask = 0x1FF;
+
+// static const int num_in_small_blocks = 29;
+static const int small_block_struct_size = (1 << 10);
+static const int small_block_size = 16;
+static const int num_in_small_blocks =
+    small_block_struct_size / small_block_size - 3;
+static const word_t small_block_availble_mask = (1L << num_in_small_blocks) - 1;
 
 /* rounds up to the nearest multiple of ALIGNMENT */
 static size_t align(size_t x) {
@@ -89,6 +98,14 @@ typedef struct block
         } ptr;
     } data;
 } block_t;
+
+typedef struct small_block
+{
+    struct small_block *next;
+    struct small_block *prev;
+    word_t available_bits;
+    char payload[0];
+} small_block_t;
 
 /* Function prototypes for internal helper routines */
 static block_t *extend_heap(size_t size);
@@ -128,11 +145,15 @@ static void link_blocks(block_t *prev, block_t* next);
 static int find_fit_segregated_list(int size);
 static void print_free_list();
 
+static void* find_free_small_blocks();
+static small_block_t* find_in_small_block(word_t addr);
+
 bool mm_checkheap(int lineno);
 
 static block_t *heap_listp = NULL;
 static int *segregated_size = NULL;
 static block_t **segregated_list = NULL;
+static small_block_t *small_blocks = NULL;
 
 /*
  * Initialize: return false on error, true on success.
@@ -155,7 +176,7 @@ bool mm_init(void) {
     start[1] = pack(1, true, true);
     heap_listp = (block_t *) &(start[1]);
 
-    block_size = 50;
+    block_size = 32;
     for (i = 0; i < NUM_LIST - 1; i++) {
         segregated_size[i] = block_size;
         block_size = (int)(block_size * 1.7 + 33);
@@ -196,28 +217,33 @@ void *malloc (size_t size) {
         return bp;
     }
 
-    asize = max(round_up(size + wsize, dsize), min_block_size);
-    block = find_fit(asize);
-    dbg_printf("Fit block: %p\n", (void*)block);
+    if (size <= small_block_size) {
+        bp = find_free_small_blocks();
+        return bp;
+    } else {
+        asize = round_up(size + wsize, dsize);
+        block = find_fit(asize);
+        dbg_printf("Fit block: %p\n", (void*)block);
 
-    if (block == NULL)
-    {
-        extendsize = max(asize, chunksize);
-        block = extend_heap(extendsize);
-        if (block == NULL) // extend_heap returns an error
+        if (block == NULL)
         {
-            return bp;
+            extendsize = max(asize, chunksize);
+            block = extend_heap(extendsize);
+            if (block == NULL) // extend_heap returns an error
+            {
+                return bp;
+            }
+            // print_free_list();
         }
-        // print_free_list();
+
+        place(block, asize);
+        dbg_printf("Place block: %p\n", (void*)block);
+        bp = header_to_payload(block);
+
+        dbg_printf("Malloc size %zd on address %p.\n", size, bp);
+        dbg_ensures(mm_checkheap);
+        return bp;
     }
-
-    place(block, asize);
-    dbg_printf("Place block: %p\n", (void*)block);
-    bp = header_to_payload(block);
-
-    dbg_printf("Malloc size %zd on address %p.\n", size, bp);
-    dbg_ensures(mm_checkheap);
-    return bp;
 }
 
 /*
@@ -226,6 +252,25 @@ void *malloc (size_t size) {
 void free (void *ptr) {
     if (ptr == NULL)
     {
+        return;
+    }
+
+    small_block_t *small_block;
+    if ((small_block =
+        find_in_small_block((word_t)ptr))) {
+        word_t bias = ((word_t)(ptr - (void*)small_block) >> 4) - 3;
+        small_block->available_bits |= (1L << bias);
+        if (!(small_block->available_bits ^ small_block_availble_mask)) {
+            small_block_t *next = small_block->next;
+            small_block_t *prev = small_block->prev;
+            if (next != NULL)
+                next->prev = prev;
+            if (prev != NULL)
+                prev->next = next;
+            else
+                small_blocks = next;
+            free((void*)small_block);
+        }
         return;
     }
 
@@ -395,6 +440,70 @@ static block_t *extend_heap(size_t size)
     // Coalesce in case the previous block was free
     dbg_printf("Coalesce\n");
     return coalesce(block);
+}
+
+static void* find_free_small_blocks() {
+    small_block_t *small_block;
+    void *addr = NULL;
+    for (small_block = small_blocks; small_block != NULL;
+        small_block = small_block->next) {
+        if (small_block->available_bits) {
+            for (int i = 0; i < num_in_small_blocks; i++) {
+                if ((small_block->available_bits >> i) & 1) {
+                    addr = ((void*)small_block) + small_block_size * (i + 3);
+                    small_block->available_bits ^= (1L << i);
+                    break;
+                }
+            }
+        }
+        if (addr != NULL)
+            break;
+    }
+    if (addr == NULL) {
+        small_block_t *small_block_iter;
+        small_block_t *next = NULL, *prev = NULL;
+
+        small_block = (small_block_t*)malloc(small_block_struct_size);
+        small_block->available_bits = (small_block_availble_mask ^ 1);
+        for (small_block_iter = small_blocks; small_block_iter != NULL;
+            small_block_iter = small_block_iter->next) {
+            if (small_block < small_block_iter) {
+                next = small_block_iter;
+                break;
+            }
+            prev = small_block_iter;
+        }
+
+        /* prev is NULL means inserting new block to the head */
+        if (prev == NULL)
+            small_blocks = small_block;
+        else
+            prev->next = small_block;
+
+        if (next != NULL)
+            next->prev = small_block;
+
+        small_block->next = next;
+        small_block->prev = prev;
+
+        addr = ((void*)small_block) + 48;
+    }
+    dbg_printf("[small block] small_block: %p, addr: %p\n",
+        (void*)small_block, (void*)addr);
+    return addr;
+}
+
+static small_block_t* find_in_small_block(word_t addr) {
+    small_block_t *small_block;
+    for (small_block = small_blocks; small_block != NULL;
+        small_block = small_block->next) {
+        if ((word_t)small_block >= addr)
+            return NULL;
+        if ((word_t)small_block < addr &&
+            ((word_t)small_block + small_block_struct_size) > addr)
+            return small_block;
+    }
+    return NULL;
 }
 
 /*
